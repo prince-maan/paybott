@@ -116,20 +116,15 @@ def expire_qr(chat_id, message_id, order_id):
             pass
 
 # ==========================================
-# 🛑 कोर्स डिलीवरी सिस्टम 🛑
+# 🛑 कोर्स डिलीवरी सिस्टम (सिर्फ Pay Now बटन के साथ) 🛑
 # ==========================================
 def send_course_to_user(chat_id, course):
     try: promo_items = json.loads(course["promo_media"])
     except: promo_items = []
 
     markup = InlineKeyboardMarkup()
-    # नए बटन्स जो तुमने मांगे थे
-    markup.row(InlineKeyboardButton(f"💳 Pay Now (UPI) - ₹{course['amount']}", callback_data=f"pay_rzp_{course['course_id']}"))
-    
-    btn_row = []
-    if INTERNATIONAL_LINK: btn_row.append(InlineKeyboardButton("🌍 International", url=INTERNATIONAL_LINK))
-    if CHAT_LINK: btn_row.append(InlineKeyboardButton("💬 Chat with Me", url=CHAT_LINK))
-    if btn_row: markup.row(*btn_row)
+    # सिर्फ और सिर्फ Pay Now का बटन रखा गया है
+    markup.row(InlineKeyboardButton(f"💳 Pay Now - ₹{course['amount']}", callback_data=f"pay_rzp_{course['course_id']}"))
 
     media_items = [it for it in promo_items if it["type"] in ["photo", "video"]]
     
@@ -256,7 +251,7 @@ def handle_buttons(call):
     chat_id = call.message.chat.id
     msg_id = call.message.message_id
 
-    # --- USER: RAZORPAY PAYMENT (अब बिना QR के) ---
+    # --- USER: RAZORPAY PAYMENT (यूज़र डिटेल्स और नए बटन्स के साथ) ---
     if data.startswith("pay_rzp_"):
         bot.answer_callback_query(call.id, "⏳ Generating Secure Payment Link...", show_alert=False)
         course_id = data.replace("pay_rzp_", "")
@@ -267,7 +262,7 @@ def handle_buttons(call):
             amount_in_paise = int(float(course["amount"]) * 100) 
 
             try:
-                # यहाँ डमी ईमेल और नंबर डाल दिया है ताकि यूजर को ना भरना पड़े
+                # डमी नंबर को बदल दिया ताकि एरर ना आए
                 pl_data = {
                     "amount": amount_in_paise,
                     "currency": "INR",
@@ -277,7 +272,7 @@ def handle_buttons(call):
                     "customer": {
                         "name": call.from_user.first_name or "Telegram User",
                         "email": "user@telegram.com",
-                        "contact": "+919999999999"
+                        "contact": "+919876543210" 
                     },
                     "notify": {"sms": False, "email": False},
                     "reminder_enable": False
@@ -287,16 +282,28 @@ def handle_buttons(call):
 
                 pending_orders[order_id] = {"chat_id": chat_id, "course_id": course_id}
 
+                # यूज़र की डिटेल्स निकालना
+                user_name = call.from_user.first_name or "User"
+                if call.from_user.username:
+                    user_name += f" (@{call.from_user.username})"
+                user_id_str = str(call.from_user.id)
+
+                # नया इनवॉइस मैसेज
                 text_msg = (
-                    f"🆔 <b>Order ID:</b> <code>{order_id}</code>\n"
+                    f"👤 <b>User:</b> {user_name}\n"
+                    f"🆔 <b>User ID:</b> <code>{user_id_str}</code>\n"
+                    f"🔖 <b>Order ID:</b> <code>{order_id}</code>\n"
                     f"💰 <b>Amount:</b> ₹{course['amount']}\n\n"
                     f"✅ <b>How to pay:</b>\n"
-                    f"Click the button below to pay securely via UPI, Card, etc.\n\n"
+                    f"Click the button below to pay via UPI (GPay, PhonePe, Paytm, etc.) or Card.\n\n"
                     f"⏳ <i>Auto-Verification Active! The pack will be sent here automatically upon payment.</i>"
                 )
 
+                # नए बटन्स (यूपीआई और इंटरनेशनल)
                 markup = InlineKeyboardMarkup()
-                markup.row(InlineKeyboardButton("🔗 Proceed to Pay", url=short_url))
+                markup.row(InlineKeyboardButton("✅ Pay via UPI / PhonePe / GPay", url=short_url))
+                if INTERNATIONAL_LINK:
+                    markup.row(InlineKeyboardButton("🌍 International (Chat)", url=INTERNATIONAL_LINK))
 
                 sent_msg = bot.send_message(chat_id, text_msg, reply_markup=markup, parse_mode="HTML")
                 threading.Timer(600, expire_qr, args=(chat_id, sent_msg.message_id, order_id)).start()
