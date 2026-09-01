@@ -1,4 +1,3 @@
-import io
 import json
 import os
 import sqlite3
@@ -8,7 +7,6 @@ import hmac
 import hashlib
 from datetime import datetime
 from flask import Flask, request
-import qrcode
 import razorpay
 import telebot
 from telebot.types import (
@@ -103,7 +101,6 @@ def get_batch_data(batch_id):
 # --- स्टेट मैनेजमेंट ---
 admin_data = {}
 pending_orders = {} 
-user_qr_messages = {}
 
 def expire_qr(chat_id, message_id, order_id):
     if order_id in pending_orders:
@@ -111,7 +108,7 @@ def expire_qr(chat_id, message_id, order_id):
             bot.delete_message(chat_id, message_id)
             bot.send_message(
                 chat_id,
-                "❌ <b>Your payment session (10 minutes) has expired! Please try again.</b>",
+                "❌ <b>Your payment link (10 minutes) has expired! Please try again.</b>",
                 parse_mode="HTML",
             )
             del pending_orders[order_id]
@@ -126,7 +123,8 @@ def send_course_to_user(chat_id, course):
     except: promo_items = []
 
     markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton(f"💳 Pay ₹{course['amount']} (Auto Verify)", callback_data=f"pay_rzp_{course['course_id']}"))
+    # नए बटन्स जो तुमने मांगे थे
+    markup.row(InlineKeyboardButton(f"💳 Pay Now (UPI) - ₹{course['amount']}", callback_data=f"pay_rzp_{course['course_id']}"))
     
     btn_row = []
     if INTERNATIONAL_LINK: btn_row.append(InlineKeyboardButton("🌍 International", url=INTERNATIONAL_LINK))
@@ -258,9 +256,9 @@ def handle_buttons(call):
     chat_id = call.message.chat.id
     msg_id = call.message.message_id
 
-    # --- USER: RAZORPAY PAYMENT ---
+    # --- USER: RAZORPAY PAYMENT (अब बिना QR के) ---
     if data.startswith("pay_rzp_"):
-        bot.answer_callback_query(call.id, "⏳ Generating Secure Payment QR...", show_alert=False)
+        bot.answer_callback_query(call.id, "⏳ Generating Secure Payment Link...", show_alert=False)
         course_id = data.replace("pay_rzp_", "")
         course = get_course_data(course_id)
         
@@ -269,42 +267,38 @@ def handle_buttons(call):
             amount_in_paise = int(float(course["amount"]) * 100) 
 
             try:
+                # यहाँ डमी ईमेल और नंबर डाल दिया है ताकि यूजर को ना भरना पड़े
                 pl_data = {
                     "amount": amount_in_paise,
                     "currency": "INR",
                     "accept_partial": False,
                     "reference_id": order_id,
                     "description": f"Purchase Pack: {course_id}",
-                    "customer": {"name": call.from_user.first_name or "Telegram User"},
+                    "customer": {
+                        "name": call.from_user.first_name or "Telegram User",
+                        "email": "user@telegram.com",
+                        "contact": "+919999999999"
+                    },
                     "notify": {"sms": False, "email": False},
                     "reminder_enable": False
                 }
                 payment_link = rzp_client.payment_link.create(pl_data)
                 short_url = payment_link['short_url']
 
-                qr = qrcode.QRCode(version=1, box_size=10, border=2)
-                qr.add_data(short_url)
-                qr.make(fit=True)
-                qr_img = qr.make_image(fill_color="black", back_color="white")
-                
-                bio = io.BytesIO()
-                qr_img.save(bio, "PNG")
-                bio.seek(0)
-
                 pending_orders[order_id] = {"chat_id": chat_id, "course_id": course_id}
 
-                invoice_text = (
+                text_msg = (
                     f"🆔 <b>Order ID:</b> <code>{order_id}</code>\n"
                     f"💰 <b>Amount:</b> ₹{course['amount']}\n\n"
                     f"✅ <b>How to pay:</b>\n"
-                    f"Scan this QR Code using any UPI app (GPay, PhonePe, Paytm).\n\n"
+                    f"Click the button below to pay securely via UPI, Card, etc.\n\n"
                     f"⏳ <i>Auto-Verification Active! The pack will be sent here automatically upon payment.</i>"
                 )
 
                 markup = InlineKeyboardMarkup()
-                markup.row(InlineKeyboardButton("🔗 Open Payment Link", url=short_url))
+                markup.row(InlineKeyboardButton("🔗 Proceed to Pay", url=short_url))
 
-                sent_msg = bot.send_photo(chat_id, photo=bio, caption=invoice_text, reply_markup=markup, parse_mode="HTML")
+                sent_msg = bot.send_message(chat_id, text_msg, reply_markup=markup, parse_mode="HTML")
                 threading.Timer(600, expire_qr, args=(chat_id, sent_msg.message_id, order_id)).start()
 
             except Exception as e:
