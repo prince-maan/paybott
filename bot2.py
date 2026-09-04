@@ -28,7 +28,7 @@ BOT_TOKEN = "8235615756:AAEW6m_YRrDR9dWAox6BoV2NwaAp2ucnfjc"
 SMS_HOOK_SECRET = "84dea856ae8001df1bd2912e0833bc30379dffe1"
 
 if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-    print("❌ ERROR: BOT_TOKEN abhi placeholder hai.")
+    print("❌ ERROR: BOT_TOKEN placeholder hai.")
     sys.exit(1)
 
 ADMIN_ID = 8994976810
@@ -39,8 +39,7 @@ MERCHANT_NAME = "Study Wala"
 CHAT_LINK = "https://t.me/SaulGoodmanOp"
 INTERNATIONAL_LINK = "https://t.me/SaulGoodmanOp"
 
-# Order kitni der tak valid rahega (10 minute)
-QR_EXPIRY_SECONDS = 600
+QR_EXPIRY_SECONDS = 600  # 10 minute expiry
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -204,15 +203,24 @@ pending_orders = {}
 pending_lock = threading.Lock()
 
 
+# 🌟 स्मार्ट डायनेमिक प्राइसिंग: पहले सिंगल यूजर को फ्लैट अमाउंट, क्लैश होने पर रैंडम पैसे
 def generate_unique_amount(base_amount):
-    base = round(float(base_amount))
+    base_clean = round(float(base_amount))
+    flat_key = f"{base_clean:.2f}"
+
     with pending_lock:
+        # अगर कोई ट्रैफ़िक नहीं है, तो सबसे पहले फ्लैट राउंड अमाउंट ही दें
+        if flat_key not in pending_orders:
+            return flat_key
+
+        # अगर सेम अमाउंट वाला कोई दूसरा यूजर पहले से पेंडिंग है, तब 1 से 98 रैंडम पैसे जोड़ें
         for _ in range(300):
-            candidate = round(base + random.randint(1, 97) / 100, 2)
-            key = f"{candidate:.2f}"
-            if key not in pending_orders:
-                return key
-    return f"{base + random.random():.2f}"
+            paise = random.randint(1, 98)
+            candidate = f"{base_clean + (paise / 100):.2f}"
+            if candidate not in pending_orders:
+                return candidate
+
+        return f"{base_clean + (random.randint(1, 99) / 100):.2f}"
 
 
 # --- 10 मिनट एक्सपायरी व क्लीनअप ---
@@ -234,7 +242,7 @@ def expire_qr(chat_id, message_id, course_id, amount_key):
     try:
         bot.send_message(
             chat_id,
-            f"❌ <b>Payment session ({QR_EXPIRY_SECONDS // 60} min) expired!</b>\n\nNaya QR generate karne ke liye dobara <b>Pay</b> par click karein.",
+            f"❌ <b>Payment session ({QR_EXPIRY_SECONDS // 60} min) expired!</b>\n\nNaya QR code pane ke liye dobara <b>Pay</b> par click karein.",
             parse_mode="HTML"
         )
     except Exception:
@@ -260,12 +268,12 @@ def deliver_course_to_buyer(order, sms_text=None):
 
     if not course:
         try:
-            bot.send_message(chat_id, "⚠️ Payment verify ho gayi hai, par content nahi mila. Admin se sampark karein.")
+            bot.send_message(chat_id, "⚠️ Payment verify ho gayi hai, par pack nahi mila. Admin se sampark karein.")
         except Exception:
             pass
         return
 
-    # 🔒 PROTECTED CONTENT: Forwarding/Saving/Screen Capture disabled
+    # 🔒 PROTECTED CONTENT: Forwarding, Copying aur Saving Blocked
     try:
         bot.send_message(
             chat_id,
@@ -365,7 +373,7 @@ def send_course_to_user(chat_id, course):
         except Exception:
             pass
 
-    # केस 3: एल्बम (मल्टीपल फोटो/वीडियो)
+    # केस 3: मल्टीपल मीडिया एल्बम
     elif len(media_items) > 1:
         media_group_html = []
         for i, item in enumerate(media_items):
@@ -534,21 +542,17 @@ def handle_all_messages(message):
     if user_id == ADMIN_ID and user_id in admin_data:
         step = admin_data[ADMIN_ID].get("step")
 
-        # कोर्स में मीडिया या टेक्स्ट ऐड करना
         if step == "PROMO":
             media_type, file_id = "text", None
-            if message.photo:
-                media_type, file_id = "photo", message.photo[-1].file_id
-            elif message.video:
-                media_type, file_id = "video", message.video.file_id
-            elif message.text:
-                media_type, file_id = "text", None
+            if message.photo: media_type, file_id = "photo", message.photo[-1].file_id
+            elif message.video: media_type, file_id = "video", message.video.file_id
+            elif message.text: media_type, file_id = "text", None
 
             caption_content = message.caption or message.text or ""
             admin_data[ADMIN_ID]["promo"].append({"type": media_type, "file_id": file_id, "caption": caption_content})
 
             markup = InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next Step (Set Price)", callback_data="next_price"))
-            bot.send_message(ADMIN_ID, f"✅ <b>{media_type.capitalize()} saved!</b>\nAur media/text bhejein ya 'Next Step' par click karein.", reply_markup=markup, parse_mode="HTML")
+            bot.send_message(ADMIN_ID, f"✅ <b>{media_type.capitalize()} saved!</b>\nAur bhejein ya 'Next Step' par click karein.", reply_markup=markup, parse_mode="HTML")
             return
 
         elif step == "BC_MEDIA":
@@ -749,13 +753,13 @@ def handle_buttons(call):
             if batch: send_batch_to_user(chat_id, batch)
         return
 
-    # 💳 UPI पेमेंट (री-जनरेशन और पुराने स्टेट का क्लीनअप)
+    # 💳 UPI पेमेंट (स्मार्ट प्राइसिंग + री-जनरेशन)
     if data.startswith("pay_upi_"):
         bot.answer_callback_query(call.id, "⏳ Generating Fresh QR...", show_alert=False)
         course_id = data.replace("pay_upi_", "")
         course = get_course_data(course_id)
         if course:
-            # पिछला पेंडिंग आर्डर अगर कोई था तो उसे तुरंत डिलीट और क्लीन करें
+            # पिछला पेंडिंग आर्डर अगर कोई था तो उसे पहले साफ़ करें
             if chat_id in user_states:
                 old_amt_key = user_states[chat_id].get("amount_key")
                 with pending_lock:
@@ -907,14 +911,13 @@ def handle_buttons(call):
 # ==========================================
 app = Flask(__name__)
 
-# Rs, ₹, INR sabhi tarah ke PhonePe SMS format ke liye support
 AMOUNT_RE_DECIMAL = re.compile(r"(?:Rs\.?|₹|INR)\s?([\d,]+\.\d{2})", re.IGNORECASE)
 AMOUNT_RE_INT = re.compile(r"(?:Rs\.?|₹|INR)\s?([\d,]+)(?!\.\d)", re.IGNORECASE)
 
 
 @app.route("/")
 def home():
-    return "Telegram Bot is running with protected content & 10m auto-expiry."
+    return "Telegram Bot is running with protected content & dynamic paise matching."
 
 
 @app.route("/sms-webhook/<secret>")
@@ -934,12 +937,22 @@ def sms_webhook(secret):
         return "no amount found in sms", 200
 
     amt_str = m.group(1).replace(",", "")
+    
+    # अगर SMS में बिना पैसे के राउंड नंबर (जैसे 99) आया, तो उसे .00 में फॉर्मेट करें
+    if not has_decimal:
+        formatted_round = f"{float(amt_str):.2f}"
+    else:
+        formatted_round = amt_str
 
     with pending_lock:
         if has_decimal:
             candidates = [amt_str] if amt_str in pending_orders else []
         else:
-            candidates = [k for k in pending_orders if k.startswith(amt_str + ".")]
+            # अगर PhonePe ने सिर्फ 99 भेजा है, तो चेक करें कि क्या 99.00 वाला सिंगल यूजर पेंडिंग है
+            if formatted_round in pending_orders:
+                candidates = [formatted_round]
+            else:
+                candidates = [k for k in pending_orders if k.startswith(amt_str + ".")]
 
         if len(candidates) == 1:
             order = pending_orders.pop(candidates[0])
