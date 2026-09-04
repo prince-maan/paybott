@@ -38,7 +38,7 @@ if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
     sys.exit(1)
 
 # बाकी सेटिंग्स (tumhare pehle wale code se hi liya hai)
-ADMIN_ID = 8820964089
+ADMIN_ID = 8994976810
 DB_CHANNEL_ID = -1003757631353
 UPI_ID = "Q520245588@ybl"
 MERCHANT_NAME = "Study Wala"
