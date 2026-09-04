@@ -27,7 +27,7 @@ from telebot.types import (
 # ⚠️ सिर्फ यह एक लाइन बदलनी है — अपने BotFather वाला असली token यहां paste karo.
 # (Tumhare screenshot me token beech se cut ho gaya tha, isliye main use guess nahi kar sakta —
 #  BotFather chat me apne bot ko kholo, "API Token" copy karo, aur neeche paste kardo.)
-BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8235615756:AAEW6m_YRrDR9dWAox6BoV2NwaAp2ucnfjc"
 
 # 🔑 Yeh secret webhook URL ko lock karta hai — maine ek random value bana ke daal di hai,
 # chaho to isko waisa hi rehne do, koi dikkat nahi. Bas kisi ko share mat karna.
