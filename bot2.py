@@ -22,22 +22,15 @@ from telebot.types import (
 )
 
 # ==========================================
-# 🛑 सेटिंग्स और टोकन्स (सीधे यहीं set हैं — testing ke liye) 🛑
+# 🛑 सेटिंग्स और टोकन्स 🛑
 # ==========================================
-# ⚠️ सिर्फ यह एक लाइन बदलनी है — अपने BotFather वाला असली token यहां paste karo.
-# (Tumhare screenshot me token beech se cut ho gaya tha, isliye main use guess nahi kar sakta —
-#  BotFather chat me apne bot ko kholo, "API Token" copy karo, aur neeche paste kardo.)
 BOT_TOKEN = "8235615756:AAEW6m_YRrDR9dWAox6BoV2NwaAp2ucnfjc"
-
-# 🔑 Yeh secret webhook URL ko lock karta hai — maine ek random value bana ke daal di hai,
-# chaho to isko waisa hi rehne do, koi dikkat nahi. Bas kisi ko share mat karna.
 SMS_HOOK_SECRET = "84dea856ae8001df1bd2912e0833bc30379dffe1"
 
 if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-    print("❌ ERROR: BOT_TOKEN abhi bhi placeholder hai. Upar wali line me apna asli bot token daalo.")
+    print("❌ ERROR: BOT_TOKEN abhi placeholder hai.")
     sys.exit(1)
 
-# बाकी सेटिंग्स (tumhare pehle wale code se hi liya hai)
 ADMIN_ID = 8994976810
 DB_CHANNEL_ID = -1003757631353
 UPI_ID = "Q520245588@ybl"
@@ -46,26 +39,19 @@ MERCHANT_NAME = "Study Wala"
 CHAT_LINK = "https://t.me/SaulGoodmanOp"
 INTERNATIONAL_LINK = "https://t.me/SaulGoodmanOp"
 
-# Order kitni der tak valid rahega (seconds)
-QR_EXPIRY_SECONDS = 600  # 10 minute
+# Order kitni der tak valid rahega (10 minute)
+QR_EXPIRY_SECONDS = 600
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ==========================================
-# 🗂 SIMPLE JSON FILE STORAGE (MongoDB ki jagah) 🗂
+# 🗂 SIMPLE JSON FILE STORAGE 🗂
 # ==========================================
-# ⚠️ IMPORTANT: Render ke free/standard web service ka disk EPHEMERAL hota hai —
-# restart/redeploy hone par yeh files delete ho jaati hain. Testing ke liye theek hai,
-# lekin production me courses/purchases permanently rakhne ke liye Render "Persistent Disk"
-# add karo (Render dashboard -> Disks) aur DATA_DIR ko us disk ke path par point karo,
-# ya baad me ek proper DB (SQLite/Postgres) laga lena.
 DATA_DIR = os.environ.get("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 
 class JSONCollection:
-    """MongoDB collection jaisa hi thoda-bahut interface, lekin ek JSON file me store karta hai."""
-
     def __init__(self, name):
         self.path = os.path.join(DATA_DIR, f"{name}.json")
         self.lock = threading.Lock()
@@ -145,7 +131,6 @@ file_links_col = JSONCollection("file_links")
 menu_buttons_col = JSONCollection("menu_buttons")
 
 
-# --- डेटाबेस हेल्पर फंक्शन्स ---
 def get_course_data(course_id):
     return courses_col.find_one({"course_id": course_id})
 
@@ -215,17 +200,11 @@ admin_data = {}
 user_states = {}
 user_qr_messages = {}
 
-# 🔑 pending_orders: key = exact amount string jaise "99.07" (paise wale digit se
-# order unique pehchana jaata hai), value = order info dict.
 pending_orders = {}
 pending_lock = threading.Lock()
 
 
 def generate_unique_amount(base_amount):
-    """Base price me chhote random paise jodta hai taaki har order ka amount
-    ekdum unique ho jaaye — isi se SMS aane par pata chalta hai ki yeh
-    kis order ka payment hai (kyunki bank/UPI app ka SMS me sirf amount
-    hota hai, koi order id nahi hoti)."""
     base = round(float(base_amount))
     with pending_lock:
         for _ in range(300):
@@ -233,25 +212,37 @@ def generate_unique_amount(base_amount):
             key = f"{candidate:.2f}"
             if key not in pending_orders:
                 return key
-    # bahut hi rare fallback
     return f"{base + random.random():.2f}"
 
 
-# --- टाइमर फंक्शन्स ---
+# --- 10 मिनट एक्सपायरी व क्लीनअप ---
 def expire_qr(chat_id, message_id, course_id, amount_key):
     with pending_lock:
         pending_orders.pop(amount_key, None)
+
     if chat_id in user_states and user_states[chat_id].get("amount_key") == amount_key:
-        try:
-            bot.delete_message(chat_id, message_id)
-            bot.send_message(chat_id, f"❌ <b>Your payment session ({QR_EXPIRY_SECONDS // 60} min) has expired! Please try again.</b>", parse_mode="HTML")
-            del user_states[chat_id]
-        except Exception:
-            pass
+        del user_states[chat_id]
+
+    if chat_id in user_qr_messages and user_qr_messages[chat_id] == message_id:
+        del user_qr_messages[chat_id]
+
+    try:
+        bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+    try:
+        bot.send_message(
+            chat_id,
+            f"❌ <b>Payment session ({QR_EXPIRY_SECONDS // 60} min) expired!</b>\n\nNaya QR generate karne ke liye dobara <b>Pay</b> par click karein.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
 
 def deliver_course_to_buyer(order, sms_text=None):
-    """Payment match hone (ya admin ke /approve karne) par pack deliver karta hai."""
+    """Payment verify hone par user ko content deliver karta hai (Forwards Blocked)."""
     chat_id = order["chat_id"]
     user_id = order["user_id"]
     course_id = order["course_id"]
@@ -269,13 +260,19 @@ def deliver_course_to_buyer(order, sms_text=None):
 
     if not course:
         try:
-            bot.send_message(chat_id, "⚠️ Payment mil gayi, lekin pack details nahi mili. Admin se contact karo.")
+            bot.send_message(chat_id, "⚠️ Payment verify ho gayi hai, par content nahi mila. Admin se sampark karein.")
         except Exception:
             pass
         return
 
+    # 🔒 PROTECTED CONTENT: Forwarding/Saving/Screen Capture disabled
     try:
-        bot.send_message(chat_id, f"🎉 <b>Payment Verified!</b>\n\n{course['secret_text']}", parse_mode="HTML")
+        bot.send_message(
+            chat_id,
+            f"🎉 <b>Payment Verified Successfully!</b>\n\n{course['secret_text']}",
+            parse_mode="HTML",
+            protect_content=True
+        )
     except Exception:
         pass
 
@@ -296,14 +293,14 @@ def deliver_course_to_buyer(order, sms_text=None):
     admin_note = (
         "✅ <b>[AUTO-VERIFIED & DELIVERED]</b>\n\n"
         f"👤 <b>User:</b> {user_mention}\n"
-        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
-        f"📚 <b>Pack:</b> <code>{course_id}</code>\n"
-        f"💰 <b>Paid:</b> ₹{order['amount']}\n"
-        f"🔖 <b>Order:</b> <code>{order['order_id']}</code>\n"
+        f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
+        f"📚 <b>Course/Pack:</b> <code>{course_id}</code>\n"
+        f"💰 <b>Amount Paid:</b> ₹{order['amount']}\n"
+        f"🔖 <b>Order ID:</b> <code>{order['order_id']}</code>\n"
         f"📅 <b>Date:</b> {date_now}"
     )
     if sms_text:
-        admin_note += f"\n\n📩 <b>SMS:</b> <code>{sms_text[:300]}</code>"
+        admin_note += f"\n\n📩 <b>PhonePe SMS:</b> <code>{sms_text[:300]}</code>"
     try:
         bot.send_message(DB_CHANNEL_ID, admin_note, parse_mode="HTML")
     except Exception:
@@ -311,11 +308,13 @@ def deliver_course_to_buyer(order, sms_text=None):
 
 
 # ==========================================
-# 🛑 कोर्स व बैच डिलीवरी 🛑
+# 🛑 कोर्स डिलीवरी (सपोर्ट्स टेक्स्ट व मीडिया दोनों) 🛑
 # ==========================================
 def send_course_to_user(chat_id, course):
-    try: promo_items = json.loads(course.get("promo_media", "[]"))
-    except Exception: promo_items = []
+    try:
+        promo_items = json.loads(course.get("promo_media", "[]"))
+    except Exception:
+        promo_items = []
 
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton(f"🇮🇳 UPI (Pay ₹{course['amount']})", callback_data=f"pay_upi_{course['course_id']}"))
@@ -325,7 +324,9 @@ def send_course_to_user(chat_id, course):
     if CHAT_LINK: btn_row.append(InlineKeyboardButton("💬 Chat with Me", url=CHAT_LINK))
     if btn_row: markup.row(*btn_row)
 
-    media_items = [it for it in promo_items if it["type"] in ["photo", "video"]]
+    media_items = [it for it in promo_items if it.get("type") in ["photo", "video"]]
+    text_items = [it for it in promo_items if it.get("type") == "text"]
+
     first_photo_caption = ""
     for it in media_items:
         if it.get("caption"):
@@ -340,34 +341,62 @@ def send_course_to_user(chat_id, course):
 
     if len(final_album_caption) > 1000: final_album_caption = final_album_caption[:1000] + "..."
 
-    if len(media_items) == 1:
+    # केस 1: अगर कोर्स में सिर्फ टेक्स्ट है (कोई फोटो/वीडियो नहीं)
+    if len(media_items) == 0:
+        full_text = ""
+        for t in text_items:
+            full_text += t.get("caption", "") + "\n\n"
+        if custom_caption:
+            full_text += custom_caption
+
+        if not full_text.strip():
+            full_text = f"📚 <b>Course Pack: {course['course_id']}</b>\nPrice: ₹{course['amount']}"
+
+        bot.send_message(chat_id, full_text.strip(), reply_markup=markup, parse_mode="HTML", protect_content=True)
+
+    # केस 2: सिंगल मीडिया
+    elif len(media_items) == 1:
         item = media_items[0]
         try:
-            if item["type"] == "photo": bot.send_photo(chat_id, item["file_id"], caption=final_album_caption, reply_markup=markup, parse_mode="HTML")
-            elif item["type"] == "video": bot.send_video(chat_id, item["file_id"], caption=final_album_caption, reply_markup=markup, parse_mode="HTML")
-        except Exception: pass
+            if item["type"] == "photo":
+                bot.send_photo(chat_id, item["file_id"], caption=final_album_caption, reply_markup=markup, parse_mode="HTML", protect_content=True)
+            elif item["type"] == "video":
+                bot.send_video(chat_id, item["file_id"], caption=final_album_caption, reply_markup=markup, parse_mode="HTML", protect_content=True)
+        except Exception:
+            pass
+
+    # केस 3: एल्बम (मल्टीपल फोटो/वीडियो)
     elif len(media_items) > 1:
         media_group_html = []
         for i, item in enumerate(media_items):
             cap = final_album_caption if i == 0 else ""
-            if item["type"] == "photo": media_group_html.append(InputMediaPhoto(item["file_id"], caption=cap, parse_mode="HTML"))
-            elif item["type"] == "video": media_group_html.append(InputMediaVideo(item["file_id"], caption=cap, parse_mode="HTML"))
-        try: bot.send_media_group(chat_id, media_group_html)
-        except Exception: pass
-        try: bot.send_message(chat_id, f"👆 <b>Choose an option to buy this pack (₹{course['amount']}):</b>\n", reply_markup=markup, parse_mode="HTML")
-        except Exception: pass
+            if item["type"] == "photo":
+                media_group_html.append(InputMediaPhoto(item["file_id"], caption=cap, parse_mode="HTML"))
+            elif item["type"] == "video":
+                media_group_html.append(InputMediaVideo(item["file_id"], caption=cap, parse_mode="HTML"))
+        try:
+            bot.send_media_group(chat_id, media_group_html, protect_content=True)
+        except Exception:
+            pass
+        try:
+            bot.send_message(chat_id, f"👆 <b>Choose an option to buy this pack (₹{course['amount']}):</b>\n", reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            pass
+
 
 def send_batch_to_user(chat_id, batch):
     bot.send_message(chat_id, f"📦 <b>{batch['title']}</b>\nAll packs are listed below:\n<i>(Niche sabhi packs diye gaye hain:)</i>", parse_mode="HTML")
-    try: course_ids = json.loads(batch["course_ids"])
-    except Exception: course_ids = []
+    try:
+        course_ids = json.loads(batch["course_ids"])
+    except Exception:
+        course_ids = []
 
     for cid in course_ids:
         c_data = get_course_data(cid)
         if c_data: send_course_to_user(chat_id, c_data)
 
 
-# 🌟 डायनेमिक स्टार्ट मेन्यू 🌟
+# 🌟 डायनेमिक मेन्यू 🌟
 def send_main_menu(chat_id):
     buttons = menu_buttons_col.find()
     markup = InlineKeyboardMarkup()
@@ -383,6 +412,7 @@ def send_main_menu(chat_id):
     )
     bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode="HTML")
 
+
 def send_admin_panel(chat_id):
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("➕ Add Single Pack", callback_data="admin_add_course"))
@@ -396,7 +426,7 @@ def send_admin_panel(chat_id):
 
 
 # ==========================================
-# 1. स्टार्ट कमांड
+# 1. कमांड्स
 # ==========================================
 @bot.message_handler(commands=["start"])
 def start_command(message):
@@ -430,10 +460,10 @@ def start_command(message):
             if len(media_items) == 1:
                 item = media_items[0]
                 try:
-                    if item["type"] == "text": bot.send_message(user_id, item["caption"], reply_markup=markup, parse_mode="HTML")
-                    elif item["type"] == "photo": bot.send_photo(user_id, item["file_id"], caption=item["caption"], reply_markup=markup, parse_mode="HTML")
-                    elif item["type"] == "video": bot.send_video(user_id, item["file_id"], caption=item["caption"], reply_markup=markup, parse_mode="HTML")
-                    elif item["type"] == "document": bot.send_document(user_id, item["file_id"], caption=item["caption"], reply_markup=markup, parse_mode="HTML")
+                    if item["type"] == "text": bot.send_message(user_id, item["caption"], reply_markup=markup, parse_mode="HTML", protect_content=True)
+                    elif item["type"] == "photo": bot.send_photo(user_id, item["file_id"], caption=item["caption"], reply_markup=markup, parse_mode="HTML", protect_content=True)
+                    elif item["type"] == "video": bot.send_video(user_id, item["file_id"], caption=item["caption"], reply_markup=markup, parse_mode="HTML", protect_content=True)
+                    elif item["type"] == "document": bot.send_document(user_id, item["file_id"], caption=item["caption"], reply_markup=markup, parse_mode="HTML", protect_content=True)
                 except Exception as e:
                     bot.send_message(user_id, f"❌ Error: {e}")
 
@@ -444,7 +474,7 @@ def start_command(message):
                     elif item["type"] == "video": media_group.append(InputMediaVideo(item["file_id"], caption=item["caption"], parse_mode="HTML"))
                     elif item["type"] == "document": media_group.append(InputMediaDocument(item["file_id"], caption=item["caption"], parse_mode="HTML"))
                 try:
-                    if media_group: bot.send_media_group(user_id, media_group)
+                    if media_group: bot.send_media_group(user_id, media_group, protect_content=True)
                     if buttons or any(i["type"] == "text" for i in media_items):
                         bot.send_message(user_id, "👇 <b>Check the link(s) below:</b>", reply_markup=markup, parse_mode="HTML")
                 except Exception as e:
@@ -457,13 +487,9 @@ def start_command(message):
         else: send_main_menu(user_id)
 
 
-# ==========================================
-# 1b. एडमिन: मैन्युअल अप्रूवल / पेंडिंग लिस्ट (फॉलबैक सेफ्टी नेट)
-# ==========================================
 @bot.message_handler(commands=["approve"])
 def manual_approve(message):
-    if message.chat.id != ADMIN_ID:
-        return
+    if message.chat.id != ADMIN_ID: return
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2:
         bot.reply_to(message, "Usage: <code>/approve ORDER_ID</code>", parse_mode="HTML")
@@ -477,7 +503,7 @@ def manual_approve(message):
                 break
         order = pending_orders.pop(match_key, None) if match_key else None
     if not order:
-        bot.reply_to(message, "❌ Order not found (already delivered/expired ho chuka hoga).")
+        bot.reply_to(message, "❌ Order not found.")
         return
     deliver_course_to_buyer(order)
     bot.reply_to(message, f"✅ Order {order_id} manually approved & delivered.")
@@ -485,8 +511,7 @@ def manual_approve(message):
 
 @bot.message_handler(commands=["pending"])
 def list_pending(message):
-    if message.chat.id != ADMIN_ID:
-        return
+    if message.chat.id != ADMIN_ID: return
     with pending_lock:
         items = list(pending_orders.values())
     if not items:
@@ -500,17 +525,33 @@ def list_pending(message):
 
 
 # ==========================================
-# 2. एडमिन और यूज़र मैसेज हैंडलर
+# 2. मैसेज हैंडलर (एडमिन + यूज़र)
 # ==========================================
 @bot.message_handler(content_types=["photo", "video", "document", "text"])
 def handle_all_messages(message):
     user_id = message.chat.id
 
-    # --- ADMIN FLOWS ---
     if user_id == ADMIN_ID and user_id in admin_data:
         step = admin_data[ADMIN_ID].get("step")
 
-        if step == "BC_MEDIA":
+        # कोर्स में मीडिया या टेक्स्ट ऐड करना
+        if step == "PROMO":
+            media_type, file_id = "text", None
+            if message.photo:
+                media_type, file_id = "photo", message.photo[-1].file_id
+            elif message.video:
+                media_type, file_id = "video", message.video.file_id
+            elif message.text:
+                media_type, file_id = "text", None
+
+            caption_content = message.caption or message.text or ""
+            admin_data[ADMIN_ID]["promo"].append({"type": media_type, "file_id": file_id, "caption": caption_content})
+
+            markup = InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next Step (Set Price)", callback_data="next_price"))
+            bot.send_message(ADMIN_ID, f"✅ <b>{media_type.capitalize()} saved!</b>\nAur media/text bhejein ya 'Next Step' par click karein.", reply_markup=markup, parse_mode="HTML")
+            return
+
+        elif step == "BC_MEDIA":
             media_type, file_id = "text", None
             caption = message.caption or message.text or ""
             if message.photo: media_type, file_id = "photo", message.photo[-1].file_id
@@ -530,9 +571,9 @@ def handle_all_messages(message):
                     admin_data[ADMIN_ID].setdefault("buttons", []).append({"text": text.strip(), "url": url.strip()})
                     count = len(admin_data[ADMIN_ID]["buttons"])
                     markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish & Broadcast", callback_data="bc_finish"))
-                    bot.send_message(ADMIN_ID, f"✅ <b>Button Added! (Total: {count})</b>\n\nWant to add another button? Send it in <code>Name - Link</code> format.\n\n<i>(OR click Finish to start broadcast)</i>", reply_markup=markup, parse_mode="HTML")
-                except Exception: bot.send_message(ADMIN_ID, "❌ Format Error. Use EXACTLY like this: <code>My Website - https://google.com</code>", parse_mode="HTML")
-            else: bot.send_message(ADMIN_ID, "❌ Format Error. Use EXACTLY like this: <code>My Website - https://google.com</code>", parse_mode="HTML")
+                    bot.send_message(ADMIN_ID, f"✅ <b>Button Added! (Total: {count})</b>\n\nSend another in <code>Name - Link</code> format OR click Finish.", reply_markup=markup, parse_mode="HTML")
+                except Exception: bot.send_message(ADMIN_ID, "❌ Format Error. Use: <code>Button Name - https://example.com</code>", parse_mode="HTML")
+            else: bot.send_message(ADMIN_ID, "❌ Format Error. Use: <code>Button Name - https://example.com</code>", parse_mode="HTML")
             return
 
         elif step == "FTL_MEDIA":
@@ -544,7 +585,7 @@ def handle_all_messages(message):
 
             admin_data[ADMIN_ID].setdefault("media", []).append({"type": media_type, "file_id": file_id, "caption": caption})
             markup = InlineKeyboardMarkup().row(InlineKeyboardButton("✅ Done Adding Media/Text", callback_data="ftl_done"))
-            bot.send_message(ADMIN_ID, "✅ <b>Saved!</b>\nSend another Photo/Video/Text, OR click 'Done' if finished.", reply_markup=markup, parse_mode="HTML")
+            bot.send_message(ADMIN_ID, "✅ <b>Saved!</b>\nSend another or click 'Done'.", reply_markup=markup, parse_mode="HTML")
             return
 
         elif step == "FTL_BUTTONS":
@@ -555,7 +596,7 @@ def handle_all_messages(message):
                     admin_data[ADMIN_ID].setdefault("buttons", []).append({"text": text.strip(), "url": url.strip()})
                     count = len(admin_data[ADMIN_ID]["buttons"])
                     markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish & Create Link", callback_data="ftl_finish"))
-                    bot.send_message(ADMIN_ID, f"✅ <b>Button Added! (Total: {count})</b>\n\nWant to add another button? Send it in <code>Name - Link</code> format.\n\n<i>(OR click Finish to generate link)</i>", reply_markup=markup, parse_mode="HTML")
+                    bot.send_message(ADMIN_ID, f"✅ <b>Button Added! (Total: {count})</b>", reply_markup=markup, parse_mode="HTML")
                 except Exception: bot.send_message(ADMIN_ID, "❌ Format Error.", parse_mode="HTML")
             else: bot.send_message(ADMIN_ID, "❌ Format Error.", parse_mode="HTML")
             return
@@ -564,31 +605,25 @@ def handle_all_messages(message):
             admin_data[ADMIN_ID]["title"] = message.text.strip()
             admin_data[ADMIN_ID]["step"] = "PROMO"
             admin_data[ADMIN_ID]["promo"] = []
-            bot.send_message(ADMIN_ID, f"✅ Batch title saved: <b>{admin_data[ADMIN_ID]['title']}</b>\n\n📝 <b>Send the promo media (photo/video).</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next Step", callback_data="next_price")))
-            return
-
-        elif step == "PROMO":
-            media_type, file_id = "text", None
-            if message.photo: media_type, file_id = "photo", message.photo[-1].file_id
-            elif message.video: media_type, file_id = "video", message.video.file_id
-            admin_data[ADMIN_ID]["promo"].append({"type": media_type, "file_id": file_id, "caption": message.caption or message.text or ""})
+            markup = InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next Step", callback_data="next_price"))
+            bot.send_message(ADMIN_ID, f"✅ Batch title saved: <b>{admin_data[ADMIN_ID]['title']}</b>\n\n📝 <b>Send promo media (photo/video) OR text:</b>", parse_mode="HTML", reply_markup=markup)
             return
 
         elif step == "AMOUNT":
             clean_amt = re.sub(r"[^\d.]", "", message.text.strip())
             if not clean_amt:
-                bot.send_message(ADMIN_ID, "❌ <b>Please enter the price in numbers only.</b>", parse_mode="HTML")
+                bot.send_message(ADMIN_ID, "❌ <b>Please enter numbers only.</b>", parse_mode="HTML")
                 return
             admin_data[ADMIN_ID]["amount"] = clean_amt
             admin_data[ADMIN_ID]["step"] = "CAPTION"
             markup = InlineKeyboardMarkup().row(InlineKeyboardButton("⏭ Skip (No Caption)", callback_data="skip_caption"))
-            bot.send_message(ADMIN_ID, f"✅ <b>Price ₹{clean_amt} saved!</b>\n📝 Type any extra caption.", reply_markup=markup, parse_mode="HTML")
+            bot.send_message(ADMIN_ID, f"✅ <b>Price ₹{clean_amt} saved!</b>\n📝 Type optional extra caption, or skip:", reply_markup=markup, parse_mode="HTML")
             return
 
         elif step == "CAPTION":
             admin_data[ADMIN_ID]["caption"] = message.text.strip()
             admin_data[ADMIN_ID]["step"] = "SECRET"
-            bot.send_message(ADMIN_ID, "✅ <b>Caption saved!</b>\n🔗 Now send the final secret link:", parse_mode="HTML")
+            bot.send_message(ADMIN_ID, "✅ <b>Caption saved!</b>\n🔗 Now send the final secret link or content:", parse_mode="HTML")
             return
 
         elif step == "SECRET":
@@ -616,27 +651,24 @@ def handle_all_messages(message):
         elif step == "MENU_TARGET":
             admin_data[ADMIN_ID]["menu_target"] = message.text.strip()
             admin_data[ADMIN_ID]["step"] = "MENU_TEXT"
-            bot.send_message(ADMIN_ID, "📝 <b>Send Button Text:</b>\nWhat text should appear on the button?", parse_mode="HTML")
+            bot.send_message(ADMIN_ID, "📝 <b>Send Button Text:</b>", parse_mode="HTML")
             return
 
         elif step == "MENU_TEXT":
             btn_text = message.text.strip()
             target = admin_data[ADMIN_ID]["menu_target"]
             menu_buttons_col.insert_one({"button_text": btn_text, "target_data": target})
-            bot.send_message(ADMIN_ID, f"✅ <b>Button Added!</b>\n\nText: {btn_text}\nLink: {target}", parse_mode="HTML")
+            bot.send_message(ADMIN_ID, f"✅ <b>Button Added!</b>\nText: {btn_text}\nLink: {target}", parse_mode="HTML")
             del admin_data[ADMIN_ID]
             send_admin_panel(ADMIN_ID)
             return
 
-    # Note: purani "USER PAYMENT SUBMISSION" (screenshot/UTR admin ko bhejna) yahan se
-    # hata di gayi hai — ab payment /sms-webhook route se apne aap verify hoti hai.
-    # Agar user pending payment ke dauraan kuch message bhejta hai to bas usko batado.
     if user_id in user_states:
-        bot.send_message(user_id, "⏳ <b>Payment automatically verify ho rahi hai.</b> Pay karne ke turant baad yahin pack mil jayega. Agar 10 minute me na mile to admin se contact karo.", parse_mode="HTML")
+        bot.send_message(user_id, "⏳ <b>Payment automatic verify ho rahi hai.</b> Pay karne ke turant baad yahin pack mil jayega.", parse_mode="HTML")
 
 
 # ==========================================
-# 3. कॉलबैक बटन्स हैंडलर
+# 3. कॉलबैक बटन्स
 # ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_buttons(call):
@@ -648,7 +680,7 @@ def handle_buttons(call):
         admin_data[ADMIN_ID]["step"] = "BC_BUTTONS"
         admin_data[ADMIN_ID]["buttons"] = []
         markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish & Broadcast (No Buttons)", callback_data="bc_finish"))
-        bot.send_message(ADMIN_ID, "✅ <b>Media/Text Saved!</b>\n\nDo you want to add buttons below the message?\nSend your FIRST button like this:\n<code>My Website - https://google.com</code>\n\n<i>(Or click Finish to broadcast immediately without buttons)</i>", reply_markup=markup, parse_mode="HTML")
+        bot.send_message(ADMIN_ID, "✅ <b>Media/Text Saved!</b>\nAdd button in <code>Name - Link</code> format or click Finish.", reply_markup=markup, parse_mode="HTML")
         return
 
     elif data == "bc_finish":
@@ -658,7 +690,7 @@ def handle_buttons(call):
         markup = InlineKeyboardMarkup()
         for b in buttons: markup.row(InlineKeyboardButton(b["text"], url=b["url"]))
 
-        bot.send_message(ADMIN_ID, "⏳ Broadcasting started... Please wait.")
+        bot.send_message(ADMIN_ID, "⏳ Broadcasting started...")
         users = users_col.find()
         success_count = 0
         for u in users:
@@ -678,11 +710,11 @@ def handle_buttons(call):
                         elif item["type"] == "video": media_group.append(InputMediaVideo(item["file_id"], caption=item["caption"], parse_mode="HTML"))
                         elif item["type"] == "document": media_group.append(InputMediaDocument(item["file_id"], caption=item["caption"], parse_mode="HTML"))
                     if media_group: bot.send_media_group(uid, media_group)
-                    if buttons or any(i["type"] == "text" for i in media_items): bot.send_message(uid, "👇 <b>Check the link(s) below:</b>", reply_markup=markup, parse_mode="HTML")
+                    if buttons or any(i["type"] == "text" for i in media_items): bot.send_message(uid, "👇 <b>Check below:</b>", reply_markup=markup, parse_mode="HTML")
                 success_count += 1
             except Exception: pass
 
-        bot.send_message(ADMIN_ID, f"✅ <b>Broadcast Complete!</b>\nMessage successfully sent to {success_count} users.", parse_mode="HTML")
+        bot.send_message(ADMIN_ID, f"✅ <b>Broadcast Complete!</b> Sent to {success_count} users.", parse_mode="HTML")
         del admin_data[ADMIN_ID]
         send_admin_panel(ADMIN_ID)
         return
@@ -691,7 +723,7 @@ def handle_buttons(call):
         admin_data[ADMIN_ID]["step"] = "FTL_BUTTONS"
         admin_data[ADMIN_ID]["buttons"] = []
         markup = InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish & Create Link (No Buttons)", callback_data="ftl_finish"))
-        bot.send_message(ADMIN_ID, "✅ <b>Media/Text Saved!</b>\n\nDo you want to add buttons below the message?\nSend your FIRST button like this:\n<code>My Website - https://google.com</code>\n\n<i>(Or click Finish to create link immediately without buttons)</i>", reply_markup=markup, parse_mode="HTML")
+        bot.send_message(ADMIN_ID, "✅ <b>Media/Text Saved!</b> Send button or click Finish.", reply_markup=markup, parse_mode="HTML")
         return
 
     elif data == "ftl_finish":
@@ -701,7 +733,7 @@ def handle_buttons(call):
 
         file_links_col.update_one({"file_code": file_code}, {"$set": {"file_code": file_code, "media_data": media_json, "button_data": btn_json}}, upsert=True)
         link = f"https://t.me/{bot.get_me().username}?start={file_code}"
-        bot.send_message(ADMIN_ID, f"🎉 <b>File/Album Link Created Successfully!</b>\n\n🔗 Share this link:\n<code>{link}</code>", parse_mode="HTML")
+        bot.send_message(ADMIN_ID, f"🎉 <b>Link Created!</b>\n👉 <code>{link}</code>", parse_mode="HTML")
         del admin_data[ADMIN_ID]
         send_admin_panel(ADMIN_ID)
         return
@@ -717,11 +749,24 @@ def handle_buttons(call):
             if batch: send_batch_to_user(chat_id, batch)
         return
 
+    # 💳 UPI पेमेंट (री-जनरेशन और पुराने स्टेट का क्लीनअप)
     if data.startswith("pay_upi_"):
-        bot.answer_callback_query(call.id, "⏳ Generating Payment QR...", show_alert=False)
+        bot.answer_callback_query(call.id, "⏳ Generating Fresh QR...", show_alert=False)
         course_id = data.replace("pay_upi_", "")
         course = get_course_data(course_id)
         if course:
+            # पिछला पेंडिंग आर्डर अगर कोई था तो उसे तुरंत डिलीट और क्लीन करें
+            if chat_id in user_states:
+                old_amt_key = user_states[chat_id].get("amount_key")
+                with pending_lock:
+                    pending_orders.pop(old_amt_key, None)
+                if chat_id in user_qr_messages:
+                    try:
+                        bot.delete_message(chat_id, user_qr_messages[chat_id])
+                    except Exception:
+                        pass
+                    user_qr_messages.pop(chat_id, None)
+
             order_id = str(uuid.uuid4())[:8]
             amt_key = generate_unique_amount(course["amount"])
 
@@ -750,10 +795,9 @@ def handle_buttons(call):
             )
             if course.get("custom_caption"): invoice_text += f"\n📝 {course['custom_caption']}\n"
             invoice_text += (
-                "\n⚠️ <b>Pay the EXACT amount shown above (including the paise) — "
-                "this is what confirms it's your payment.</b>\n"
-                "🤖 <b>AUTO-VERIFICATION:</b> Just pay and wait ~10-20 seconds. No screenshot needed!\n"
-                f"⏳ <i>This QR expires in {QR_EXPIRY_SECONDS // 60} minutes.</i>"
+                "\n⚠️ <b>Pay the EXACT amount shown above (including paise) for auto-delivery.</b>\n"
+                "🤖 <b>AUTO-VERIFICATION:</b> Just pay and wait ~10-20 seconds.\n"
+                f"⏳ <i>QR will expire in {QR_EXPIRY_SECONDS // 60} minutes.</i>"
             )
 
             markup = InlineKeyboardMarkup()
@@ -761,6 +805,8 @@ def handle_buttons(call):
 
             sent_msg = bot.send_photo(chat_id, photo=qr_img_bio, caption=invoice_text, reply_markup=markup, parse_mode="HTML")
             user_qr_messages[chat_id] = sent_msg.message_id
+
+            # 10 मिनट बाद ऑटोमैटिक एक्सपायर और मैसेज डिलीट
             threading.Timer(QR_EXPIRY_SECONDS, expire_qr, args=(chat_id, sent_msg.message_id, course_id, amt_key)).start()
         return
 
@@ -768,8 +814,11 @@ def handle_buttons(call):
 
     if data == "admin_add_course":
         admin_data[ADMIN_ID] = {"mode": "single", "step": "PROMO", "promo": [], "amount": None, "caption": ""}
-        markup = InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next Step", callback_data="next_price"))
-        bot.edit_message_text("📝 <b>Step 1/4: Promo Media</b>\nSend demo photo/video.", chat_id=chat_id, message_id=msg_id, reply_markup=markup, parse_mode="HTML")
+        markup = InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next Step (Set Price)", callback_data="next_price"))
+        bot.edit_message_text(
+            "📝 <b>Step 1/4: Promo Media OR Text</b>\n\nPhoto, Video bhejein YA seedhe text likh kar bhejein.\n<i>(Agar akele text ka pack banana hai toh sirf text send karein)</i>",
+            chat_id=chat_id, message_id=msg_id, reply_markup=markup, parse_mode="HTML"
+        )
 
     elif data == "admin_create_batch":
         admin_data[ADMIN_ID] = {"mode": "batch", "step": "TITLE", "course_ids": []}
@@ -777,11 +826,11 @@ def handle_buttons(call):
 
     elif data == "admin_file_link":
         admin_data[ADMIN_ID] = {"step": "FTL_MEDIA", "media": []}
-        bot.edit_message_text("📎 <b>Advanced File to Link</b>\nSend your Photos, Videos, Documents, or Texts (with captions).\n<i>(Apni file yahan bhejein:)</i>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text("📎 <b>Advanced File to Link</b>\nSend Photos, Videos, Documents, or Texts.", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
 
     elif data == "admin_broadcast":
         admin_data[ADMIN_ID] = {"step": "BC_MEDIA", "media": []}
-        bot.edit_message_text("📢 <b>Advanced Broadcast</b>\nSend the Text, Photo, Video, or Document that you want to broadcast.", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text("📢 <b>Advanced Broadcast</b>\nSend Text, Photo, Video, or Document.", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
 
     elif data == "admin_manage_menu":
         markup = InlineKeyboardMarkup()
@@ -792,17 +841,17 @@ def handle_buttons(call):
 
     elif data == "admin_menu_add":
         admin_data[ADMIN_ID] = {"step": "MENU_TARGET"}
-        bot.edit_message_text("🔗 <b>Add Menu Button</b>\nSend the Course ID (c_...), Batch ID (b_...), or Website URL:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text("🔗 <b>Add Menu Button</b>\nSend Course ID (c_...), Batch ID (b_...), or Website URL:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
 
     elif data == "admin_menu_del":
         buttons = menu_buttons_col.find()
         if not buttons:
-            bot.edit_message_text("❌ No buttons currently in menu.", chat_id=chat_id, message_id=msg_id, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data="admin_manage_menu")))
+            bot.edit_message_text("❌ No buttons in menu.", chat_id=chat_id, message_id=msg_id, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data="admin_manage_menu")))
             return
         markup = InlineKeyboardMarkup()
         for b in buttons: markup.add(InlineKeyboardButton(f"❌ {b['button_text']}", callback_data=f"delmenu_{b['_id']}"))
         markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_manage_menu"))
-        bot.edit_message_text("🗑 <b>Click a button to delete it:</b>", chat_id=chat_id, message_id=msg_id, reply_markup=markup, parse_mode="HTML")
+        bot.edit_message_text("🗑 <b>Click a button to delete:</b>", chat_id=chat_id, message_id=msg_id, reply_markup=markup, parse_mode="HTML")
 
     elif data.startswith("delmenu_"):
         btn_id = data.replace("delmenu_", "")
@@ -810,22 +859,22 @@ def handle_buttons(call):
         bot.edit_message_text("✅ <b>Button Deleted!</b>", chat_id=chat_id, message_id=msg_id, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back to Admin", callback_data="back_to_admin")), parse_mode="HTML")
 
     elif data == "next_price":
-        if ADMIN_ID not in admin_data or not admin_data[ADMIN_ID].get("promo"): return
+        if ADMIN_ID not in admin_data: return
         admin_data[ADMIN_ID]["step"] = "AMOUNT"
-        bot.edit_message_text("💰 <b>Step 2/4: Price</b>\nSend the price.", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text("💰 <b>Step 2/4: Price</b>\nEnter price in INR (e.g. 99):", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
 
     elif data == "skip_caption":
         if ADMIN_ID in admin_data:
             admin_data[ADMIN_ID]["caption"] = ""
             admin_data[ADMIN_ID]["step"] = "SECRET"
-            bot.edit_message_text("✅ <b>Caption Skipped!</b>\n🔗 <b>Step 4/4: Final Link</b>\nSend the final secret link.", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+            bot.edit_message_text("✅ <b>Caption Skipped!</b>\n🔗 <b>Step 4/4: Final Secret Link/Text:</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
 
     elif data == "batch_add_next":
         admin_data[ADMIN_ID]["step"] = "PROMO"
         admin_data[ADMIN_ID]["promo"] = []
         admin_data[ADMIN_ID]["caption"] = ""
         markup = InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next Step", callback_data="next_price"))
-        bot.edit_message_text("📝 <b>Send promo media for the next pack</b>", chat_id=chat_id, message_id=msg_id, reply_markup=markup, parse_mode="HTML")
+        bot.edit_message_text("📝 <b>Send promo media or text for the next pack:</b>", chat_id=chat_id, message_id=msg_id, reply_markup=markup, parse_mode="HTML")
 
     elif data == "batch_finish":
         d = admin_data.get(ADMIN_ID)
@@ -834,13 +883,13 @@ def handle_buttons(call):
         c_ids_json = json.dumps(d["course_ids"])
         batches_col.update_one({"batch_id": batch_id}, {"$set": {"batch_id": batch_id, "title": d["title"], "course_ids": c_ids_json}}, upsert=True)
         link = f"https://t.me/{bot.get_me().username}?start={batch_id}"
-        bot.edit_message_text(f"🎉 <b>Pack Batch Created!</b>\n👉 <code>{link}</code>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text(f"🎉 <b>Batch Created!</b>\n👉 <code>{link}</code>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         del admin_data[ADMIN_ID]
         send_admin_panel(ADMIN_ID)
 
     elif data == "admin_user_info":
         records = purchases_col.recent(15)
-        if not records: bot.edit_message_text("No one has bought a pack yet.", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        if not records: bot.edit_message_text("No purchases yet.", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         else:
             text = "👥 <b>Recent Purchases:</b>\n\n"
             for r in records: text += f"👤 {r.get('username', '')} | 📅 {r.get('date', '')[:10]} | 📚 <code>{r.get('item_info', '')}</code>\n"
@@ -854,25 +903,22 @@ def handle_buttons(call):
 
 
 # ==========================================
-# 4. Flask Web Server (Render 24/7 Hosting) + SMS Auto-Verify Webhook
+# 4. Flask Web Server & SMS Webhook
 # ==========================================
 app = Flask(__name__)
 
-AMOUNT_RE_DECIMAL = re.compile(r"Rs\.?\s?([\d,]+\.\d{2})")
-AMOUNT_RE_INT = re.compile(r"Rs\.?\s?([\d,]+)(?!\.\d)")
+# Rs, ₹, INR sabhi tarah ke PhonePe SMS format ke liye support
+AMOUNT_RE_DECIMAL = re.compile(r"(?:Rs\.?|₹|INR)\s?([\d,]+\.\d{2})", re.IGNORECASE)
+AMOUNT_RE_INT = re.compile(r"(?:Rs\.?|₹|INR)\s?([\d,]+)(?!\.\d)", re.IGNORECASE)
 
 
 @app.route("/")
 def home():
-    return "Telegram Pack Bot is running (JSON storage, SMS auto-verify webhook)."
+    return "Telegram Bot is running with protected content & 10m auto-expiry."
 
 
 @app.route("/sms-webhook/<secret>")
 def sms_webhook(secret):
-    """MacroDroid (ya koi bhi SMS-forwarding app) yahan GET request bhejta hai jab
-    payment ka SMS aata hai. URL example:
-    https://YOUR-APP.onrender.com/sms-webhook/<SMS_HOOK_SECRET>?text={sms_message}
-    """
     if secret != SMS_HOOK_SECRET:
         return "forbidden", 403
 
@@ -893,8 +939,6 @@ def sms_webhook(secret):
         if has_decimal:
             candidates = [amt_str] if amt_str in pending_orders else []
         else:
-            # SMS me paise nahi the (round amount) — sabhi pending orders dhoondo jinka
-            # base amount match karta ho.
             candidates = [k for k in pending_orders if k.startswith(amt_str + ".")]
 
         if len(candidates) == 1:
@@ -909,7 +953,7 @@ def sms_webhook(secret):
 
     if ambiguous:
         try:
-            bot.send_message(DB_CHANNEL_ID, f"⚠️ <b>Ambiguous payment</b> ₹{amt_str} — multiple pending orders match. Check /pending and use /approve manually.\n\n📩 SMS: <code>{sms_text[:300]}</code>", parse_mode="HTML")
+            bot.send_message(DB_CHANNEL_ID, f"⚠️ <b>Ambiguous payment</b> ₹{amt_str} — check /pending and use /approve.\n\n📩 SMS: <code>{sms_text[:300]}</code>", parse_mode="HTML")
         except Exception:
             pass
         return "ambiguous", 200
@@ -925,14 +969,12 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
 
     def run_bot():
-        # 🟢 यह 'while True' लूप 409 Conflict एरर आने पर बॉट को क्रैश होने से बचाएगा
         while True:
             try:
                 print("🤖 Bot is starting and connecting to Telegram API...")
                 bot.infinity_polling(skip_pending=True)
             except Exception as e:
-                print(f"⚠️ Bot API Error (Probably 409 Conflict): {e}")
-                print("🔄 Retrying in 5 seconds to wait for Render old instance to die...")
+                print(f"⚠️ Bot API Error: {e}")
                 time.sleep(5)
 
     t = threading.Thread(target=run_bot, daemon=True)
