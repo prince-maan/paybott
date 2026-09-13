@@ -47,6 +47,8 @@ ORDER_TTL_HOURS = int(os.environ.get("ORDER_TTL_HOURS", "48"))
 DASHBOARD_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "changeme123")
 
+BOT_USERNAME = "your_bot"
+
 try:
     ADMIN_ID = int(os.environ.get("ADMIN_ID"))
     DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID"))
@@ -186,7 +188,7 @@ def generate_upi_qr(amount, order_id):
     return bio, clean_amt
 
 # ==========================================
-# 🛡️ RATE LIMITER & STATE MANAGEMENT (Crash Proof)
+# 🛡️ RATE LIMITER & STATE MANAGEMENT
 # ==========================================
 admin_data, user_states, user_qr_messages, pending_orders, all_orders_cache = {}, {}, {}, {}, {}
 user_cooldowns = {}
@@ -217,15 +219,21 @@ def clear_user_state(user_id):
     users_col.update_one({"user_id": user_id}, {"$unset": {"bot_state": "", "bot_state_order": "", "bot_state_amt": ""}})
 
 def generate_unique_amount(base_amount):
-    base_clean = round(float(base_amount))
-    flat_key = f"{base_clean:.2f}"
+    """
+    1 पैसा, 2 पैसा सीक्वेंशियल जनरेटर:
+    User 1: ₹50.01
+    User 2: ₹50.02
+    User 3: ₹50.03 ...
+    कभी भी .00 नहीं देगा ताकि पेमेंट कभी क्लैश न हो।
+    """
+    base_clean = int(round(float(base_amount)))
     with pending_lock:
-        if flat_key not in pending_orders: return flat_key
-        for _ in range(300):
-            paise = random.randint(1, 98)
+        for paise in range(1, 100):
             candidate = f"{base_clean + (paise / 100):.2f}"
-            if candidate not in pending_orders: return candidate
-        return f"{base_clean + (random.randint(1, 99) / 100):.2f}"
+            if candidate not in pending_orders:
+                return candidate
+        paise = random.randint(1, 99)
+        return f"{base_clean + (paise / 100):.2f}"
 
 # ==========================================
 # 🎟 OFFER VALIDATION
@@ -291,7 +299,6 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
             deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
             return
 
-    # Atomic Update for Expiry to prevent Race Conditions
     res = orders_col.update_one({"order_id": order_id, "status": "PENDING"}, {"$set": {"status": "EXPIRED"}})
     if res.modified_count == 0:
         return 
@@ -317,9 +324,8 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     course = courses_col.find_one({"course_id": course_id})
     new_status = "COMPLETED_MANUAL" if is_manual else "COMPLETED_AUTO"
     
-    # Atomic Lock
     res = orders_col.update_one({"order_id": order_id, "status": {"$in": ["PENDING", "EXPIRED"]}}, {"$set": {"status": new_status, "delivered_at": get_ist_time(), "delivered_at_ts": time.time()}})
-    if res.modified_count == 0: return # Prevents double delivery
+    if res.modified_count == 0: return
 
     order["status"] = new_status
     with pending_lock: pending_orders.pop(order.get("amount"), None)
@@ -360,7 +366,7 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
         except Exception: pass
 
 # ==========================================
-# 🛑 GATEKEEPER: CHANNEL JOIN REQUEST HANDLER
+# 🛑 GATEKEEPER: CHANNEL JOIN REQUEST
 # ==========================================
 @bot.chat_join_request_handler()
 def handle_join_request(message):
@@ -643,7 +649,7 @@ def handle_all_messages(message):
             try:
                 lim = int(re.sub(r"[^\d]", "", message.text.strip()))
                 admin_data[ADMIN_ID]["max_users"], admin_data[ADMIN_ID]["step"] = -1 if lim == 0 else lim, "OFFER_PERUSER"
-                bot.send_message(ADMIN_ID, "🔁 <b>Ek user kitni baar yeh offer claim/use kar sakta hai?</b>\n(<b>1</b> = sirf ek baar hi — recommended, taaki koi doosre course par offer reuse na kar sake. <b>0</b> = unlimited baar):", parse_mode="HTML")
+                bot.send_message(ADMIN_ID, "🔁 <b>Ek user kitni baar yeh offer claim/use kar sakta hai?</b>\n(<b>1</b> = sirf ek baar hi — recommended. <b>0</b> = unlimited baar):", parse_mode="HTML")
             except Exception: bot.send_message(ADMIN_ID, "❌ Invalid number.")
             return
         elif step == "OFFER_PERUSER":
@@ -664,7 +670,7 @@ def handle_all_messages(message):
                     "expires_at_ts": now_ts + (hrs * 3600), "expires_str": (datetime.now(IST) + timedelta(hours=hrs)).strftime("%d-%m-%Y %I:%M %p")
                 }
                 offers_col.insert_one(doc)
-                bot.send_message(ADMIN_ID, f"🎉 <b>Discount Offer Link Created!</b>\n👉 <code>https://t.me/{bot.get_me().username}?start={off_code}</code>", parse_mode="HTML")
+                bot.send_message(ADMIN_ID, f"🎉 <b>Discount Offer Link Created!</b>\n👉 <code>https://t.me/{BOT_USERNAME}?start={off_code}</code>", parse_mode="HTML")
                 del admin_data[ADMIN_ID]
                 send_admin_panel(ADMIN_ID)
             except Exception: bot.send_message(ADMIN_ID, "❌ Invalid hours.")
@@ -712,7 +718,7 @@ def handle_all_messages(message):
             cid = "c_" + str(uuid.uuid4())[:6]
             courses_col.update_one({"course_id": cid}, {"$set": {"course_id": cid, "promo_media": admin_data[ADMIN_ID]["promo"], "amount": admin_data[ADMIN_ID]["amount"], "custom_caption": admin_data[ADMIN_ID].get("caption",""), "secret_text": get_formatted_text(message)}}, upsert=True)
             if admin_data[ADMIN_ID].get("mode") == "single":
-                bot.send_message(ADMIN_ID, f"🎉 <b>Pack created!</b>\n👉 <code>https://t.me/{bot.get_me().username}?start={cid}</code>", parse_mode="HTML")
+                bot.send_message(ADMIN_ID, f"🎉 <b>Pack created!</b>\n👉 <code>https://t.me/{BOT_USERNAME}?start={cid}</code>", parse_mode="HTML")
                 del admin_data[ADMIN_ID]
                 send_admin_panel(ADMIN_ID)
             elif admin_data[ADMIN_ID].get("mode") == "batch":
@@ -751,7 +757,7 @@ def handle_all_messages(message):
                 }}, upsert=True)
                 
                 if admin_data[ADMIN_ID].get("mode") == "single":
-                    bot.send_message(ADMIN_ID, f"🎉 <b>Channel Pack created! ({channel_name})</b>\n👉 <code>https://t.me/{bot.get_me().username}?start={cid}</code>", parse_mode="HTML")
+                    bot.send_message(ADMIN_ID, f"🎉 <b>Channel Pack created! ({channel_name})</b>\n👉 <code>https://t.me/{BOT_USERNAME}?start={cid}</code>", parse_mode="HTML")
                     del admin_data[ADMIN_ID]
                     send_admin_panel(ADMIN_ID)
                 elif admin_data[ADMIN_ID].get("mode") == "batch":
@@ -791,7 +797,10 @@ def handle_all_messages(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_buttons(call):
+    global BOT_USERNAME
     data, chat_id, msg_id = call.data, call.message.chat.id, call.message.message_id
+    
+    # एंटी-स्पैम बटन हैंडलर
     if not check_rate_limit(chat_id, 1.5): 
         return bot.answer_callback_query(call.id, "⚠️ थोड़ा धीमे! (Slow down)", show_alert=False)
     register_activity(chat_id)
@@ -938,8 +947,24 @@ def handle_buttons(call):
             orig_send_message(chat_id, f"❌ <b>ORDER {oid} REJECTED</b>", reply_to_message_id=msg_id, parse_mode="HTML")
         except Exception: pass
         return
+
+    # ==========================================
+    # ⚡ QR CODE GENERATION (With Live Temporary Loader)
+    # ==========================================
     if data.startswith("pay_upi_"):
-        bot.answer_callback_query(call.id, "⏳ Generating Fresh QR...", show_alert=False)
+        bot.answer_callback_query(call.id)
+        
+        # तुरंत यूज़र को चैट में लोडिंग मैसेज भेजें
+        loading_msg = None
+        try:
+            loading_msg = orig_send_message(
+                chat_id,
+                "⏳ <b>आपका सुरक्षित क्यूआर कोड जनरेट हो रहा है...</b>\n<i>(कृपया 1-2 सेकंड प्रतीक्षा करें)</i>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
         course_id = data.replace("pay_upi_", "")
         course = courses_col.find_one({"course_id": course_id})
         if course:
@@ -963,6 +988,7 @@ def handle_buttons(call):
                 else:
                     clear_user_offer(call.from_user.id, active_off_code)
                     
+            # 1 पैसा, 2 पैसा वाला यूनिक अमाउंट बनाएँ
             order_id, amt_key = str(uuid.uuid4())[:8], generate_unique_amount(final_base)
             u_men = f"<a href='tg://user?id={call.from_user.id}'>{call.from_user.first_name}</a> (@{call.from_user.username or ''})"
             o_data = {
@@ -990,8 +1016,12 @@ def handle_buttons(call):
             if sms_rec:
                 updated = sms_pool_col.update_one({"_id": sms_rec["_id"], "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
                 if updated.modified_count > 0:
+                    if loading_msg:
+                        try: bot.delete_message(chat_id, loading_msg.message_id)
+                        except Exception: pass
                     return deliver_course_to_buyer(o_data, sms_text=sms_rec.get("raw_text"), is_manual=False)
 
+            # QR इमेज जनरेट करें
             qr_img_bio, clean_amt = generate_upi_qr(amt_key, order_id)
             inv = f"👤 <b>User:</b> {call.from_user.first_name}\n🆔 <b>Order:</b> <code>{order_id}</code>\n💰 <b>Amount:</b> ₹{clean_amt}\n⚠️ <b>Exact Amount Pay Karein.</b>\n⏳ <i>QR {QR_EXPIRY_SECONDS // 60} min mein expire hoga.</i>"
             m = InlineKeyboardMarkup()
@@ -999,7 +1029,17 @@ def handle_buttons(call):
             sent_msg = bot.send_photo(chat_id, photo=qr_img_bio, caption=inv, reply_markup=m, parse_mode="HTML")
             user_qr_messages[chat_id] = sent_msg.message_id
             orders_col.update_one({"order_id": order_id}, {"$set": {"qr_msg_id": sent_msg.message_id}})
+            
+            # QR सफलतापूर्वक जाने के बाद लोडिंग मैसेज तुरंत डिलीट करें
+            if loading_msg:
+                try: bot.delete_message(chat_id, loading_msg.message_id)
+                except Exception: pass
+
             threading.Timer(QR_EXPIRY_SECONDS, expire_qr, args=(chat_id, sent_msg.message_id, course_id, amt_key, order_id)).start()
+        else:
+            if loading_msg:
+                try: bot.delete_message(chat_id, loading_msg.message_id)
+                except Exception: pass
         return
 
     bot.answer_callback_query(call.id)
@@ -1087,7 +1127,6 @@ def handle_buttons(call):
 app = Flask(__name__)
 AMOUNT_RE_DECIMAL = re.compile(r"(?:Rs\.?|₹|INR)\s?([\d,]+\.\d{2})", re.IGNORECASE)
 AMOUNT_RE_INT = re.compile(r"(?:Rs\.?|₹|INR)\s?([\d,]+)(?!\.\d)", re.IGNORECASE)
-BOT_USERNAME = "your_bot" 
 
 @app.route("/")
 def home(): return "Telegram Bot API Running."
@@ -1441,7 +1480,7 @@ def dashboard_page(): return DASHBOARD_HTML
 def global_sms_checker():
     while True:
         try:
-            time.sleep(10) # 10 सेकंड में एक बार डेटाबेस से चेक करेगा
+            time.sleep(10)
             pending_orders_list = list(orders_col.find({"status": "PENDING"}))
             for order in pending_orders_list:
                 amt_key = order.get("amount")
@@ -1450,18 +1489,16 @@ def global_sms_checker():
                     updated = sms_pool_col.update_one({"_id": sms_rec["_id"], "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
                     if updated.modified_count > 0:
                         deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
-        except Exception as e:
+        except Exception:
             pass
 
 def global_memory_cleanup():
     while True:
         try:
-            time.sleep(3600) # हर 1 घंटे में मेमोरी क्लीन करेगा
+            time.sleep(3600)
             now = time.time()
-            # Clear old orders cache
             keys_to_del = [oid for oid, o in all_orders_cache.items() if now - o.get("created_at", 0) > 86400]
             for k in keys_to_del: all_orders_cache.pop(k, None)
-            # Clear old cooldown limits
             cool_keys = [uid for uid, t in user_cooldowns.items() if now - t > 3600]
             for k in cool_keys: user_cooldowns.pop(k, None)
         except Exception: pass
@@ -1477,10 +1514,11 @@ def restore_pending_orders():
             threading.Thread(target=expire_qr, args=(chat_id, order.get("qr_msg_id"), order["course_id"], amt_key, order_id), daemon=True).start()
 
 if __name__ == "__main__":
-    try: BOT_USERNAME = bot.get_me().username
+    try: 
+        me = bot.get_me()
+        BOT_USERNAME = me.username
     except Exception: pass
     
-    # Start Services
     restore_pending_orders()
     threading.Thread(target=global_sms_checker, daemon=True).start()
     threading.Thread(target=global_memory_cleanup, daemon=True).start()
